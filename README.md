@@ -20,9 +20,9 @@ This repository hosts the hardware and software architecture of an autonomous Lo
 
 ## Getting Started
 1. **Hardware Setup:** Flash the `.ino` files located in `/Firmware` to their respective microcontrollers.
-2. **TTN Configuration:** Register the devices on The Things Network and apply the Uplink Decoder provided in `/Docs/formatter.js`.
+2. **TTN Configuration:** Register the devices on The Things Network and apply the Uplink Decoder provided in `/Docs/payload_decoder_UL_ttn.js`.
 3. **Backend Deployment:** Install dependencies (`npm install mqtt @influxdata/influxdb-client node-fetch`) and execute the Node.js services to bridge TTN and InfluxDB.
-4. **Observability:** Import `Docs/grafana_dashboard.json` into your Grafana instance to instantly replicate the visual interface.
+4. **Observability:** Import `Docs/Smart_Farm_Dashboard.json` into your Grafana instance to instantly replicate the visual interface.
 
 ## License
 Distributed under the MIT License. Open-source contribution for the IoT and Maker community.
