@@ -1,0 +1,30 @@
+function decodeUplink(input) {
+  if (input.bytes.length < 12) {
+    return { data: {}, warnings: ['Short frame, not from sensor'], errors: [] };
+  }
+  
+  var raw_wind = (input.bytes[0] << 8) | input.bytes[1];
+  var moisture_pct = (input.bytes[2] << 8) | input.bytes[3];
+  var raw_rain = (input.bytes[4] << 8) | input.bytes[5];
+  
+  var raw_temp = (input.bytes[6] << 8) | input.bytes[7];
+  if (raw_temp & 0x8000) { 
+    raw_temp = raw_temp - 0x10000;
+  }
+  
+  var raw_env_hum = (input.bytes[8] << 8) | input.bytes[9];
+  var raw_pres = (input.bytes[10] << 8) | input.bytes[11];
+
+  return {
+    data: {
+      wind_speed: raw_wind / 10.0,
+      soil_moisture: moisture_pct,
+      accumulated_rain: raw_rain / 10.0,
+      ambient_temperature: raw_temp / 10.0,
+      ambient_humidity: raw_env_hum / 10.0,
+      atmospheric_pressure: raw_pres / 10.0
+    },
+    warnings: [],
+    errors: []
+  };
+}

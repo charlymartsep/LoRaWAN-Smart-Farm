@@ -1,0 +1,134 @@
+#include <MKRWAN_v2.h>
+#include <Wire.h>
+#include <I2CSoilMoistureSensor.h>
+#include <DFRobot_RainfallSensor.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+
+LoRaModem modem;
+String appEui = "0000000000000000";
+String appKey = "3BF703A9421419C4ED7FE53B76A038A1";
+
+// --- SENSORS ---
+const int anemometerPin = A6;
+I2CSoilMoistureSensor soilSensor;
+DFRobot_RainfallSensor_I2C rainSensor(&Wire);
+Adafruit_BME280 bme; // Object for the BME280 Seengreat module
+
+// --- MOISTURE CALIBRATION ---
+const int dryValue = 248;    
+const int wetValue = 600; 
+
+unsigned long lastSendTime = 0;
+const unsigned long interval = 120000;
+
+void setup() {
+  Serial.begin(115200);
+  while(!Serial && millis() < 5000); 
+  Serial.println("--- STARTING WEATHER STATION ---");
+  
+  analogReadResolution(12); 
+  Wire.begin();
+  soilSensor.begin();
+  
+  if (!rainSensor.begin()) {
+    Serial.println("Warning: I2C Rain gauge not found. Check wiring.");
+  } else {
+    Serial.println("Rain gauge OK.");
+  }
+
+  // Initialize BME280 (I2C Address 0x77 for Seengreat module with floating ADDR)
+  if (!bme.begin(0x77)) {
+    Serial.println("Warning: BME280 sensor not found. Check wiring.");
+  } else {
+    Serial.println("BME280 OK.");
+  }
+  
+  delay(1000); 
+  
+  if (!modem.begin(EU868)) {
+    Serial.println("ERROR: LoRa chip not responding.");
+    while (1) {} 
+  }
+  
+  Serial.println("Connecting to TTN...");
+  if (modem.joinOTAA(appEui, appKey)) {
+    Serial.println("SUCCESS! Connected to TTN.");
+  } else {
+    Serial.println("Warning: Temporary TTN join failure (will keep trying).");
+  }
+}
+
+void loop() {
+  // 1. WIND SPEED
+  int adcReading = analogRead(anemometerPin);
+  float voltage = (adcReading * 3.3) / 4095.0;
+  float windSpeedKMH = (voltage / 1.2) * 30.0 * 3.6;
+  if (windSpeedKMH < 0.2) windSpeedKMH = 0.0;
+
+  // 2. SOIL MOISTURE
+  unsigned int rawMoisture = soilSensor.getCapacitance();
+
+  // Print raw value to monitor actual sensor readings
+  Serial.print(">>> RAW Moisture: "); 
+  Serial.println(rawMoisture);
+
+  int moisturePercent = map(rawMoisture, dryValue, wetValue, 0, 100);
+  moisturePercent = constrain(moisturePercent, 0, 100);
+
+  // 3. ACCUMULATED RAIN
+  float rainMM = rainSensor.getRainfall(); 
+
+  // 4. BME280 (Ambient Temperature, Humidity, and Atmospheric Pressure)
+  float ambientTemp = bme.readTemperature();
+  float ambientHum = bme.readHumidity();
+  float atmPressure = bme.readPressure() / 100.0F; // Converted to hPa
+
+  // Local print to Serial Monitor
+  Serial.print("Wind: "); Serial.print(windSpeedKMH);
+  Serial.print(" km/h | Soil: "); Serial.print(moisturePercent);
+  Serial.print(" % | Rain: "); Serial.print(rainMM);
+  Serial.print(" mm | Temp: "); Serial.print(ambientTemp);
+  Serial.print(" C | AirHum: "); Serial.print(ambientHum);
+  Serial.print(" % | Pressure: "); Serial.print(atmPressure);
+  Serial.println(" hPa");
+
+  // SEND TO TTN EVERY 2 MINUTES (120000 ms)
+  if (millis() - lastSendTime > interval) {
+    uint16_t valWind = (uint16_t)(windSpeedKMH * 10);
+    uint16_t valMoisture = (uint16_t)moisturePercent; 
+    uint16_t valRain = (uint16_t)(rainMM * 10);
+    
+    int16_t valTemp = (int16_t)(ambientTemp * 10); 
+    uint16_t valHum = (uint16_t)(ambientHum * 10);
+    uint16_t valPressure = (uint16_t)(atmPressure * 10);
+    
+    // 12-byte payload for the 6 metrics
+    byte payload[12]; 
+    payload[0] = (byte)(valWind >> 8);
+    payload[1] = (byte)(valWind & 0xFF);
+    payload[2] = (byte)(valMoisture >> 8);
+    payload[3] = (byte)(valMoisture & 0xFF);
+    payload[4] = (byte)(valRain >> 8);
+    payload[5] = (byte)(valRain & 0xFF);
+    payload[6] = (byte)(valTemp >> 8);
+    payload[7] = (byte)(valTemp & 0xFF);
+    payload[8] = (byte)(valHum >> 8);
+    payload[9] = (byte)(valHum & 0xFF);
+    payload[10] = (byte)(valPressure >> 8);
+    payload[11] = (byte)(valPressure & 0xFF);
+    
+    modem.setPort(1); 
+    modem.beginPacket();
+    modem.write(payload, 12); 
+    if (modem.endPacket(false) > 0) {
+      Serial.println(">>> LoRa packet sent (12 bytes) successfully <<<");
+    } else {  
+      Serial.println(">>> Error sending LoRa packet <<<");
+    }
+    
+    lastSendTime = millis();
+  }
+  
+  delay(1000); 
+}

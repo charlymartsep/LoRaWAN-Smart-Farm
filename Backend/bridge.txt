@@ -1,0 +1,48 @@
+const { InfluxDB, Point } = require('@influxdata/influxdb-client');
+const mqtt = require('mqtt');
+
+const url = 'http://localhost:8181';
+const token = 'apiv3_37xjz1v2lr-_B79RcVZ01G7FeCzxDkO7g4YEW1od0gUgUrKwk2Q2WOIoxeio3eVzCc4NNdVPmXWklTNp3PUDsg'; 
+const org = 'default';
+const bucket = 'smart_farm_tfg';
+
+const influxDB = new InfluxDB({ url, token });
+const writeApi = influxDB.getWriteApi(org, bucket);
+
+const mqttClient = mqtt.connect('mqtt://localhost:1883');
+const topicMQTT = 'tfg/garden/sensors'; 
+
+const safeFloat = (val) => {
+  const num = parseFloat(val);
+  return isNaN(num) ? 0.0 : num;
+};
+
+console.log('BRIDGE SERVER: Listening and saving to InfluxDB');
+
+mqttClient.on('connect', () => {
+  console.log('Connected to MQTT Broker. Waiting for data...');
+  mqttClient.subscribe(topicMQTT);
+});
+
+mqttClient.on('message', (topic, message) => {
+  try {
+    const data = JSON.parse(message.toString());
+    
+    const point = new Point('general_weather')
+      .tag('node', data.node || 'unknown') 
+      .floatField('soil_moisture', safeFloat(data.soil_moisture))
+      .floatField('ambient_light', safeFloat(data.ambient_light))
+      .floatField('ambient_temperature', safeFloat(data.ambient_temperature))
+      .floatField('ambient_humidity', safeFloat(data.ambient_humidity))
+      .floatField('atmospheric_pressure', safeFloat(data.atmospheric_pressure))
+      .floatField('wind_speed', safeFloat(data.wind_speed))
+      .floatField('accumulated_rain', safeFloat(data.accumulated_rain));
+
+    writeApi.writePoint(point);
+    
+    const time = new Date().toLocaleTimeString();
+    console.log(`[${time}] RECEIVED from: ${data.node || 'unknown_node'} -> Saved to InfluxDB.`);
+  } catch (e) {
+    console.error("Error processing JSON:", e);
+  }
+});
