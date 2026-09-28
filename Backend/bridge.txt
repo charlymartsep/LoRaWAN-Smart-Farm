@@ -1,15 +1,15 @@
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 const mqtt = require('mqtt');
 
-const url = 'http://localhost:8181';
-const token = 'apiv3_37xjz1v2lr-_B79RcVZ01G7FeCzxDkO7g4YEW1od0gUgUrKwk2Q2WOIoxeio3eVzCc4NNdVPmXWklTNp3PUDsg'; 
+const url = 'http://localhost:xxxx';
+const token = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; 
 const org = 'default';
 const bucket = 'smart_farm_tfg';
 
 const influxDB = new InfluxDB({ url, token });
 const writeApi = influxDB.getWriteApi(org, bucket);
 
-const mqttClient = mqtt.connect('mqtt://localhost:1883');
+const mqttClient = mqtt.connect('mqtt://localhost:xxxx');
 const topicMQTT = 'tfg/garden/sensors'; 
 
 const safeFloat = (val) => {

@@ -6,8 +6,8 @@
 #include <Adafruit_BME280.h>
 
 LoRaModem modem;
-String appEui = "0000000000000000";
-String appKey = "3BF703A9421419C4ED7FE53B76A038A1";
+String appEui = "XXXXXXXXXXXXXXXXXXX";
+String appKey = "XXXXXXXXXXXXXXXXXXX";
 
 // --- SENSORS ---
 const int anemometerPin = A6;
