@@ -1,0 +1,194 @@
+// Actuator node - LILYGO T3-S3 (ESP32-S3 + SX1262)
+// Opens and closes the 12 V motorized ball valve through the relay when
+// a downlink arrives, and closes it by itself when the local timer runs
+// out, even if the LoRaWAN link is lost. The join nonces are kept in
+// flash, so a reboot never repeats a DevNonce that TTN has accepted.
+// Between heartbeats the ESP32-S3 and the SX1262 stay in
+// light sleep. The RAM, the LoRaWAN session and the relay
+// output are kept, and the node wakes up for the next
+// heartbeat or exactriz when the valve has to close.
+
+#include <RadioLib.h>
+#include <SPI.h>
+#include <Preferences.h>
+#include "esp_sleep.h"
+#include "driver/gpio.h"
+
+// --- SX1262 PINS ---
+#define LORA_MISO 3
+#define LORA_MOSI 6
+#define LORA_SCK  5
+#define LORA_CS   7
+#define LORA_RST  8
+#define LORA_DIO1 33
+#define LORA_BUSY 34
+
+// --- RELAY ---
+const int RELAY_PIN = 48;
+
+#define RELAY_OPEN  LOW
+#define RELAY_CLOSE HIGH
+
+// --- HEARTBEAT INTERVALS AND WATERING LIMITS ---
+const uint32_t IDLE_INTERVAL_S      = 600;   // heartbeat, valve closed
+const uint32_t WATERING_INTERVAL_S  = 120;   // heartbeat, valve open
+const uint32_t DEFAULT_WATERING_MIN = 10;
+const uint32_t MAX_WATERING_MIN     = 30;
+
+// --- LOW POWER ---
+// true: light sleep between heartbeats. false: stay awake,
+// needed to read the serial monitor over USB, which
+// disconnects during light sleep.
+const bool USE_SLEEP = true;
+
+// --- TTN CREDENTIALS ---
+// The keys are not shown in the report: copy them from the TTN console.
+uint64_t joinEUI = 0xXXXXXXXXXXXXXXXX;
+uint64_t devEUI  = 0xXXXXXXXXXXXXXXXX;
+uint8_t appKey[16] = { 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX,
+                       0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, };
+uint8_t nwkKey[16] = { 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX,
+		       0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, };
+
+SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+LoRaWANNode node(&radio, &EU868);
+
+Preferences store;   // ESP32 non-volatile storage for the nonces
+
+bool isOpen = false;
+unsigned long closeAt = 0;
+
+// Saves the DevNonce counter after every join attempt, accepted or not
+void saveNonces() {
+  uint8_t* nonces = node.getBufferNonces();
+  store.putBytes("nonces", nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+}
+
+void closeValve() {
+  digitalWrite(RELAY_PIN, RELAY_CLOSE);
+  isOpen = false;
+  closeAt = 0;
+}
+
+void openValve(uint32_t minutes) {
+  if (minutes == 0) minutes = DEFAULT_WATERING_MIN;
+  if (minutes > MAX_WATERING_MIN) minutes = MAX_WATERING_MIN;
+  digitalWrite(RELAY_PIN, RELAY_OPEN);
+  isOpen = true;
+  closeAt = millis() + minutes * 60000UL;
+  Serial.printf(">>> COMMAND RECEIVED: OPEN VALVE %lu min <<<\n",
+                (unsigned long)minutes);
+}
+
+void checkTimer() {
+  if (isOpen && (long)(millis() - closeAt) >= 0) {
+    closeValve();
+    Serial.println("Timer finished: VALVE CLOSED");
+  }
+}
+
+// Waits ms milliseconds. With USE_SLEEP the radio sleeps,
+// the relay pin is held at its current level and the
+// ESP32-S3 enters light sleep until the timer wakes it up.
+// millis() keeps counting during light sleep.
+void sleepFor(unsigned long ms) {
+  if (!USE_SLEEP || ms < 20) {
+    delay(ms < 200 ? ms : 200);
+    return;
+  }
+  Serial.flush();
+  radio.sleep();
+  gpio_hold_en((gpio_num_t)RELAY_PIN);
+  esp_sleep_enable_timer_wakeup((uint64_t)ms * 1000ULL);
+  esp_light_sleep_start();
+  gpio_hold_dis((gpio_num_t)RELAY_PIN);
+  radio.standby();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_CLOSE);
+
+  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
+
+  Serial.print("Starting SX1262... ");
+  int16_t state = radio.begin();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("failed, code %d\n", state);
+    while (true) delay(1000);
+  }
+  Serial.println("OK");
+  radio.setDio2AsRfSwitch(true);
+  radio.setOutputPower(14);
+  node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
+
+  // Restore the nonces of the previous run, if any
+  store.begin("radiolib", false);
+  if (store.isKey("nonces")) {
+    uint8_t buf[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+    store.getBytes("nonces", buf, RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+    state = node.setBufferNonces(buf);
+    Serial.printf("Nonces restored (%d)\n", state);
+  }
+
+  Serial.println("Connecting to TTN...");
+  state = node.activateOTAA();
+  saveNonces();
+  while (state != RADIOLIB_LORAWAN_NEW_SESSION &&
+         state != RADIOLIB_LORAWAN_SESSION_RESTORED) {
+    Serial.printf("Join failed (%d), retrying in 30 s\n", state);
+    delay(30000);
+    state = node.activateOTAA();
+    saveNonces();
+  }
+  store.end();
+  Serial.println("Connected to TTN!");
+}
+
+void loop() {
+  uint8_t minutesLeft = 0;
+  if (isOpen) {
+    long ms = (long)(closeAt - millis());
+    minutesLeft = (ms > 0) ? (uint8_t)((ms + 59999) / 60000) : 0;
+  }
+  uint8_t up[2] = { (uint8_t)(isOpen ? 1 : 0), minutesLeft };
+  uint8_t down[16];
+  size_t len = 0;
+
+  Serial.println("Sending status heartbeat...");
+  int16_t state = node.sendReceive(up, sizeof(up), 1, down, &len);
+
+  if (state > 0 && len > 0) {
+    if (down[0] == 0x01) {
+      openValve(len >= 2 ? down[1] : 0);
+    } else if (down[0] == 0x00) {
+      closeValve();
+      Serial.println(">>> COMMAND RECEIVED: CLOSE VALVE <<<");
+    }
+  } else if (state != RADIOLIB_ERR_NONE && state <= 0) {
+    Serial.printf("Send error: %d\n", state);
+  }
+  Serial.println("Heartbeat sent. Waiting for commands...");
+
+  unsigned long waitMs =
+      (isOpen ? WATERING_INTERVAL_S : IDLE_INTERVAL_S) * 1000UL;
+  unsigned long t0 = millis();
+  while (millis() - t0 < waitMs) {
+    checkTimer();
+    unsigned long elapsed = millis() - t0;
+    if (elapsed >= waitMs) break;
+    unsigned long sleepMs = waitMs - elapsed;
+    // With the valve open, wake up when the timer runs out
+    if (isOpen) {
+      long toClose = (long)(closeAt - millis());
+      if (toClose < 0) toClose = 0;
+      if ((unsigned long)toClose < sleepMs) {
+        sleepMs = (unsigned long)toClose;
+      }
+    }
+    sleepFor(sleepMs);
+  }
+}

@@ -1,0 +1,54 @@
+function decodeUplink(input) {
+  var b = input.bytes;
+
+  // Weather station: 16 bytes
+  if (b.length === 16) {
+    var raw_wind = (b[0] << 8) | b[1];
+    var moisture_pct = (b[2] << 8) | b[3];
+    var raw_rain = (b[4] << 8) | b[5];
+
+    var raw_temp = (b[6] << 8) | b[7];
+    if (raw_temp & 0x8000) {
+      raw_temp -= 0x10000;
+    }
+
+    var raw_env_hum = (b[8] << 8) | b[9];
+    var raw_pres = (b[10] << 8) | b[11];
+
+    // 32-bit unsigned uplink counter
+    var uplink_counter = ((b[12] << 24) | (b[13] << 16) | (b[14] << 8) | b[15]) >>> 0;
+
+    return {
+      data: {
+        wind_speed: raw_wind / 10.0,
+        soil_moisture: moisture_pct,
+        accumulated_rain: raw_rain / 10.0,
+        ambient_temperature: raw_temp / 10.0,
+        ambient_humidity: raw_env_hum / 10.0,
+        atmospheric_pressure: raw_pres / 10.0,
+        uplink_counter: uplink_counter
+      },
+      warnings: [],
+      errors: []
+    };
+  }
+
+  // Valve heartbeat: 2 bytes (state, minutes left)
+  if (b.length === 2) {
+    return {
+      data: {
+        valve_open: b[0] === 1,
+        valve_minutes_left: b[1]
+      },
+      warnings: [],
+      errors: []
+    };
+  }
+
+  // Anything else
+  return {
+    data: {},
+    warnings: ['Unexpected frame length: ' + b.length],
+    errors: []
+  };
+}

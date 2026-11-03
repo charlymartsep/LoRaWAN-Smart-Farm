@@ -1,0 +1,166 @@
+#include <MKRWAN_v2.h>
+#include <Wire.h>
+#include <ArduinoLowPower.h>
+#include <I2CSoilMoistureSensor.h>
+#include <DFRobot_RainfallSensor.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+
+// --- CONFIGURATION ---
+// USE_SLEEP = true : low-power sleep between uplinks (field use).
+// USE_SLEEP = false: delay() instead, USB serial keeps working.
+const bool USE_SLEEP = true;
+const unsigned long SEND_INTERVAL = 300000;   // 5 min, TTN fair use
+
+LoRaModem modem;
+String appEui = "XXXXXXXXXXXXXXXXXXXX";
+String appKey = "XXXXXXXXXXXXXXXXXXXX";
+
+// --- SENSORS ---
+const int anemometerPin = A6;
+I2CSoilMoistureSensor soilSensor;
+DFRobot_RainfallSensor_I2C rainSensor(&Wire);
+Adafruit_BME280 bme;                          // Seengreat BME280 module
+
+// --- SOIL MOISTURE CALIBRATION ---
+const int dryValue = 248;
+const int wetValue = 600;
+
+// Uplink counter: kept in RAM during sleep, back to 0 on reboot.
+// The server uses it to detect lost packets and reboots.
+uint32_t uplinkCounter = 0;
+
+void setup() {
+  Serial.begin(115200);
+  if (!USE_SLEEP) {
+    while (!Serial && millis() < 5000);
+  }
+  Serial.println("--- WEATHER STATION STARTING ---");
+
+  analogReadResolution(12);
+  Wire.begin();
+  soilSensor.begin();
+
+  if (!rainSensor.begin()) {
+    Serial.println("Warning: I2C rain gauge not found. Check wiring.");
+  } else {
+    Serial.println("Rain gauge OK.");
+  }
+
+  // Initialize BME280 at I2C address 0x77 (ADDR pin high)
+  if (!bme.begin(0x77)) {
+    Serial.println("Warning: BME280 not found. Check the wiring.");
+  } else {
+    // Forced mode: the sensor measures only when asked and sleeps the
+    // rest of the time. Same x16 oversampling as the library default,
+    // so the accuracy of the readings does not change.
+    bme.setSampling(Adafruit_BME280::MODE_FORCED,
+                    Adafruit_BME280::SAMPLING_X16,   // temperature
+                    Adafruit_BME280::SAMPLING_X16,   // pressure
+                    Adafruit_BME280::SAMPLING_X16,   // humidity
+                    Adafruit_BME280::FILTER_OFF);
+    Serial.println("BME280 OK.");
+  }
+
+  delay(1000);
+
+  if (!modem.begin(EU868)) {
+    Serial.println("ERROR: LoRa module not responding.");
+    while (1) {}
+  }
+
+  Serial.println("Connecting to TTN...");
+  while (!modem.joinOTAA(appEui, appKey)) {
+    Serial.println("Join failed, retrying in 30 s");
+    delay(30000);
+  }
+  Serial.println("SUCCESS! Connected to TTN.");
+}
+
+void loop() {
+  // 1. WIND: average of 20 readings over 2 s instead of a single sample
+  float adcSum = 0;
+  for (int i = 0; i < 20; i++) {
+    adcSum += analogRead(anemometerPin);
+    delay(100);
+  }
+  float voltage = (adcSum / 20.0) * 3.3 / 4095.0;
+  float windSpeedKMH = (voltage / 1.2) * 30.0 * 3.6;
+  if (windSpeedKMH < 0.2) windSpeedKMH = 0.0;
+
+  // 2. SOIL MOISTURE: the first reading after a long pause is discarded
+  soilSensor.getCapacitance();
+  delay(500);
+  unsigned int rawMoisture = soilSensor.getCapacitance();
+  Serial.print(">>> RAW moisture: ");
+  Serial.println(rawMoisture);
+
+  int moisturePercent = map(rawMoisture, dryValue, wetValue, 0, 100);
+  moisturePercent = constrain(moisturePercent, 0, 100);
+
+  // 3. ACCUMULATED RAIN: the gauge also counts tips while asleep
+  float rainMM = rainSensor.getRainfall();
+
+  // 4. BME280 (temperature, air humidity, pressure): forced reading
+  bme.takeForcedMeasurement();
+  float ambientTemp = bme.readTemperature();
+  float ambientHum = bme.readHumidity();
+  float pressureHPa = bme.readPressure() / 100.0F;   // hPa
+
+  // Serial monitor
+  Serial.print("Wind: "); Serial.print(windSpeedKMH);
+  Serial.print(" km/h | Soil: "); Serial.print(moisturePercent);
+  Serial.print(" % | Rain: "); Serial.print(rainMM);
+  Serial.print(" mm | Temp: "); Serial.print(ambientTemp);
+  Serial.print(" C | Air hum: "); Serial.print(ambientHum);
+  Serial.print(" % | Pressure: "); Serial.print(pressureHPa);
+  Serial.println(" hPa");
+
+  // 5. UPLINK TO TTN
+  uint16_t windVal     = (uint16_t)(windSpeedKMH * 10);
+  uint16_t moistureVal = (uint16_t)moisturePercent;   // not scaled
+  uint16_t rainVal     = (uint16_t)(rainMM * 10);
+
+  int16_t  tempVal     = (int16_t)(ambientTemp * 10);
+  uint16_t airHumVal   = (uint16_t)(ambientHum * 10);
+  uint16_t pressureVal = (uint16_t)(pressureHPa * 10);
+
+  uplinkCounter++;   // the first packet is number 1
+
+  // 16-byte payload: 6 values (12 bytes) + 32-bit counter
+  byte payload[16];
+  payload[0]  = (byte)(windVal >> 8);
+  payload[1]  = (byte)(windVal & 0xFF);
+  payload[2]  = (byte)(moistureVal >> 8);
+  payload[3]  = (byte)(moistureVal & 0xFF);
+  payload[4]  = (byte)(rainVal >> 8);
+  payload[5]  = (byte)(rainVal & 0xFF);
+  payload[6]  = (byte)(tempVal >> 8);
+  payload[7]  = (byte)(tempVal & 0xFF);
+  payload[8]  = (byte)(airHumVal >> 8);
+  payload[9]  = (byte)(airHumVal & 0xFF);
+  payload[10] = (byte)(pressureVal >> 8);
+  payload[11] = (byte)(pressureVal & 0xFF);
+  payload[12] = (byte)(uplinkCounter >> 24);
+  payload[13] = (byte)(uplinkCounter >> 16);
+  payload[14] = (byte)(uplinkCounter >> 8);
+  payload[15] = (byte)(uplinkCounter & 0xFF);
+
+  modem.setPort(1);
+  modem.beginPacket();
+  modem.write(payload, 16);
+  if (modem.endPacket(false) > 0) {
+    Serial.print(">>> LoRa packet sent (16 bytes), counter ");
+    Serial.println(uplinkCounter);
+  } else {
+    Serial.println(">>> Error sending LoRa packet <<<");
+  }
+
+  // 6. WAIT UNTIL THE NEXT CYCLE
+  if (USE_SLEEP) {
+    soilSensor.sleep();              // woken up by the next I2C read
+    LowPower.sleep(SEND_INTERVAL);   // USB link and millis() pause
+  } else {
+    delay(SEND_INTERVAL);
+  }
+}
